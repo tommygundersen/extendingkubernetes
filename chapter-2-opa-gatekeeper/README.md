@@ -612,3 +612,5 @@ Continue to **[Chapter 3: Azure Service Operator v2](../chapter-3-aso/README.md)
 ## ⚠️ Disclaimer
 
 Educational/lab purposes only. Calculations and/or statements may contain errors.
+
+This documentation is provided "as is" without warranty of any kind. The author takes no responsibility for any errors, omissions, or inaccuracies contained herein. This material may contain incorrect or outdated information. Always verify configurations against official Microsoft Azure and Kubernetes documentation before use in production environments. Use at your own risk.
