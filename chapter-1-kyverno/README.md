@@ -379,14 +379,22 @@ echo "⬆️ The above should show a policy violation error"
 
 ## 📊 Step 10: View Policy Reports
 
-Kyverno generates reports for policy results. In newer versions, Kyverno uses ephemeral reports:
+Kyverno generates reports for policy results. Reports are scoped based on the resources being evaluated:
+- **`ephemeralreports`** - Temporary reports for namespaced resources (Pods, Deployments, etc.)
+- **`clusterephemeralreports`** - Temporary reports for cluster-scoped resources (Namespaces, ClusterRoles, etc.)
+- **`policyreports`** - Aggregated, persistent reports for namespaced resources
+- **`clusterpolicyreports`** - Aggregated, persistent reports for cluster-scoped resources
+
+> **💡 Ephemeral vs PolicyReports**: Ephemeral reports are short-lived (a few minutes) and get aggregated into PolicyReports, then cleaned up to save storage. If you don't see ephemeral reports, check the aggregated PolicyReports instead.
 
 ```bash
-# View cluster ephemeral reports (newer Kyverno versions)
-kubectl get clusterephemeralreports -A
+# View aggregated policy reports (persistent - check these first!)
+kubectl get policyreports -n policy-test
+kubectl get clusterpolicyreports -A
 
-# View namespace ephemeral reports
+# View ephemeral reports (temporary - may be empty if already aggregated)
 kubectl get ephemeralreports -n policy-test
+kubectl get ephemeralreports -A
 
 # Alternative: Check policy status directly on the ClusterPolicy
 kubectl get clusterpolicy -o custom-columns=NAME:.metadata.name,READY:.status.ready,MESSAGE:.status.conditions[0].message
@@ -398,15 +406,15 @@ kubectl describe clusterpolicy require-labels | grep -A 10 "Status:"
 > **Note**: Policy reports may show "No resources found" if:
 > - No violations have occurred (policies in `Enforce` mode block resources before they're created)
 > - Background scanning hasn't completed yet
-> - You're using a newer Kyverno version with ephemeral reports instead of traditional policy reports
+> - You're checking the wrong report type (use `policyreports` for Pods, not `clusterpolicyreports`)
 
 **Understanding Policy Modes and Reports:**
 
-| Mode            | Violation Blocked?       | Report Generated?                             |
-| --------------- | ------------------------ | --------------------------------------------- |
-| `Enforce`       | ✅ Resource blocked       | ❌ No (resource never created)                 |
-| `Audit`         | ❌ Resource allowed       | ✅ Ephemeral report for violation              |
-| Background scan | N/A (existing resources) | ✅ Report for existing non-compliant resources |
+| Mode            | Violation Blocked?       | Report Generated?                          |
+| --------------- | ------------------------ | ------------------------------------------ |
+| `Enforce`       | ✅ Resource blocked       | ❌ No (resource never created)              |
+| `Audit`         | ❌ Resource allowed       | ✅ PolicyReport for violation               |
+| Background scan | N/A (existing resources) | ✅ PolicyReport for non-compliant resources |
 
 > **💡 Why "No resources found"?** Since our policies use `Enforce` mode, violations are blocked at admission time and never reach etcd. No resource = no report. You'll see reports when using `Audit` mode (Step 11) or when compliant resources are scanned.
 

@@ -192,7 +192,13 @@ echo "✅ Namespace 'aso-demo' created"
 
 ## 🏗️ Step 7: Create a ResourceGroup Reference in Kubernetes
 
-ASO requires a Kubernetes ResourceGroup resource to reference the Azure resource group. We'll create one that references our existing resource group:
+ASO requires a Kubernetes ResourceGroup resource to reference the Azure resource group. Even though the Azure resource group already exists, we need to create a Kubernetes representation of it so that:
+
+1. **ASO tracks the resource** - The ResourceGroup object in etcd tells ASO "this Azure RG exists"
+2. **Other ASO resources can reference it** - Step 8's StorageAccount uses `owner.name: $RESOURCE_GROUP`, which must resolve to a Kubernetes ResourceGroup object
+3. **ASO adopts existing resources** - When ASO finds an Azure resource matching the spec, it "adopts" it rather than creating a duplicate
+
+> **⚠️ Why this step is required**: Without this step, the StorageAccount in Step 8 will fail with an error like `owner.name not found` because ASO looks for the ResourceGroup **in Kubernetes**, not directly in Azure.
 
 ```bash
 # Create a ResourceGroup resource that references the existing Azure RG
@@ -213,7 +219,7 @@ kubectl wait --for=condition=Ready resourcegroup/$RESOURCE_GROUP -n aso-demo --t
 echo "✅ ResourceGroup reference created"
 ```
 
-> **Note**: This creates a Kubernetes resource that represents your existing Azure resource group. ASO will recognize the existing resource group and manage it going forward.
+> **💡 Adoption vs Creation**: ASO checks if the Azure resource already exists. If it does (and matches the spec), ASO "adopts" it and starts managing it. If it doesn't exist, ASO creates it. This is why we can safely apply this even though the RG already exists.
 
 ## 🗄️ Step 8: Create an Azure Storage Account
 
