@@ -402,11 +402,13 @@ kubectl describe clusterpolicy require-labels | grep -A 10 "Status:"
 
 **Understanding Policy Modes and Reports:**
 
-| Mode            | Violation Blocked?       | Report Generated?  |
-| --------------- | ------------------------ | ------------------ |
-| `Enforce`       | ✅ Resource blocked       | ✅ Ephemeral report |
-| `Audit`         | ❌ Resource allowed       | ✅ Ephemeral report |
-| Background scan | N/A (existing resources) | ✅ Report created   |
+| Mode            | Violation Blocked?       | Report Generated?                             |
+| --------------- | ------------------------ | --------------------------------------------- |
+| `Enforce`       | ✅ Resource blocked       | ❌ No (resource never created)                 |
+| `Audit`         | ❌ Resource allowed       | ✅ Ephemeral report for violation              |
+| Background scan | N/A (existing resources) | ✅ Report for existing non-compliant resources |
+
+> **💡 Why "No resources found"?** Since our policies use `Enforce` mode, violations are blocked at admission time and never reach etcd. No resource = no report. You'll see reports when using `Audit` mode (Step 11) or when compliant resources are scanned.
 
 ## 🏷️ Step 11: Require Resource Requests and Limits
 
