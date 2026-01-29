@@ -239,71 +239,24 @@ The Crossplane Azure provider runs in the `crossplane-system` namespace. We need
 # The service account name follows the pattern: <provider-name>-<hash>
 # For now, save the identity name for later use
 
-echo "⚠️ Note: Complete Step 4 first, then return here to create the federated credential"
+echo "⚠️ Note: Complete Step 4B to install the provider with Workload Identity configuration"
 echo "CROSSPLANE_IDENTITY_NAME=$CROSSPLANE_IDENTITY_NAME" >> crossplane-env.sh
 echo "CROSSPLANE_CLIENT_ID=$CROSSPLANE_CLIENT_ID" >> crossplane-env.sh
+echo "TENANT_ID=$TENANT_ID" >> crossplane-env.sh
+echo "SUBSCRIPTION_ID=$SUBSCRIPTION_ID" >> crossplane-env.sh
+echo "AKS_OIDC_ISSUER=$AKS_OIDC_ISSUER" >> crossplane-env.sh
+echo "RESOURCE_GROUP=$RESOURCE_GROUP" >> crossplane-env.sh
 ```
 
-#### Step 3B.5: Create Federated Credential (Run after Step 4)
-
-After the Azure provider is installed in Step 4, run:
-
-```bash
-# Source the saved environment if needed
-source crossplane-env.sh 2>/dev/null || true
-
-# Get the provider pod's service account name
-export PROVIDER_SA=$(kubectl get pods -n crossplane-system -l pkg.crossplane.io/provider=provider-azure-storage -o jsonpath='{.items[0].spec.serviceAccountName}')
-
-echo "Provider Service Account: $PROVIDER_SA"
-
-# Create the federated identity credential
-az identity federated-credential create \
-  --name "crossplane-provider-federation" \
-  --identity-name $CROSSPLANE_IDENTITY_NAME \
-  --resource-group $RESOURCE_GROUP \
-  --issuer $AKS_OIDC_ISSUER \
-  --subject "system:serviceaccount:crossplane-system:$PROVIDER_SA" \
-  --audiences "api://AzureADTokenExchange"
-
-echo "✅ Federated credential created"
-```
-
-#### Step 3B.6: Annotate the Provider Service Account
-
-```bash
-# Annotate the service account with the managed identity client ID
-kubectl annotate serviceaccount $PROVIDER_SA \
-  -n crossplane-system \
-  azure.workload.identity/client-id=$CROSSPLANE_CLIENT_ID \
-  --overwrite
-
-# Label the service account for workload identity
-kubectl label serviceaccount $PROVIDER_SA \
-  -n crossplane-system \
-  azure.workload.identity/use=true \
-  --overwrite
-
-echo "✅ Service account annotated for Workload Identity"
-```
-
-#### Step 3B.7: Restart the Provider Pod
-
-```bash
-# Restart the provider pod to pick up the new identity
-kubectl delete pods -n crossplane-system -l pkg.crossplane.io/provider=provider-azure-storage
-
-echo "⏳ Waiting for provider pod to restart..."
-kubectl wait --for=condition=ready pod -l pkg.crossplane.io/provider=provider-azure-storage -n crossplane-system --timeout=120s
-
-echo "✅ Provider pod restarted with Workload Identity"
-```
-
-**➡️ After completing Option B, continue to Step 4 (if not done) or Step 6B for ProviderConfig.**
+**➡️ After completing Option B, continue to Step 4B for Workload Identity provider installation.**
 
 ---
 
 ## 📦 Step 4: Install Azure Provider
+
+Choose the option matching your authentication method from Step 3:
+
+### Option A: Install Provider (Service Principal)
 
 ```bash
 # Install the Azure Provider for Crossplane
@@ -321,6 +274,117 @@ echo "⏳ Waiting for provider to be installed..."
 kubectl wait --for=condition=healthy provider.pkg.crossplane.io/provider-azure-storage --timeout=300s
 
 echo "✅ Azure Storage Provider installed"
+```
+
+### Option B: Install Provider with Workload Identity
+
+For Workload Identity, we need a `DeploymentRuntimeConfig` to inject the OIDC token volume into the provider pod:
+
+```bash
+# Source the saved environment
+source crossplane-env.sh 2>/dev/null || true
+
+# Create DeploymentRuntimeConfig for Workload Identity
+cat <<EOF | kubectl apply -f -
+apiVersion: pkg.crossplane.io/v1beta1
+kind: DeploymentRuntimeConfig
+metadata:
+  name: azure-workload-identity
+spec:
+  deploymentTemplate:
+    spec:
+      selector: {}
+      template:
+        metadata:
+          labels:
+            azure.workload.identity/use: "true"
+        spec:
+          containers:
+          - name: package-runtime
+            env:
+            - name: AZURE_CLIENT_ID
+              value: "$CROSSPLANE_CLIENT_ID"
+            - name: AZURE_TENANT_ID
+              value: "$TENANT_ID"
+            - name: AZURE_SUBSCRIPTION_ID
+              value: "$SUBSCRIPTION_ID"
+            - name: AZURE_FEDERATED_TOKEN_FILE
+              value: "/var/run/secrets/azure/tokens/azure-identity-token"
+            volumeMounts:
+            - name: azure-identity-token
+              mountPath: /var/run/secrets/azure/tokens
+              readOnly: true
+          volumes:
+          - name: azure-identity-token
+            projected:
+              sources:
+              - serviceAccountToken:
+                  audience: api://AzureADTokenExchange
+                  expirationSeconds: 3600
+                  path: azure-identity-token
+  serviceAccountTemplate:
+    metadata:
+      annotations:
+        azure.workload.identity/client-id: "$CROSSPLANE_CLIENT_ID"
+      labels:
+        azure.workload.identity/use: "true"
+EOF
+
+echo "✅ DeploymentRuntimeConfig created"
+
+# Install the Azure Provider with the runtime config
+cat <<EOF | kubectl apply -f -
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-azure-storage
+spec:
+  package: xpkg.upbound.io/upbound/provider-azure-storage:v1.1.0
+  runtimeConfigRef:
+    name: azure-workload-identity
+EOF
+
+echo "⏳ Waiting for provider to be installed..."
+kubectl wait --for=condition=healthy provider.pkg.crossplane.io/provider-azure-storage --timeout=300s
+
+echo "✅ Azure Storage Provider installed with Workload Identity"
+```
+
+#### Step 4B.1: Create Federated Credential
+
+Now that the provider is installed, create the federated credential:
+
+```bash
+# Get the provider pod's service account name
+export PROVIDER_SA=$(kubectl get pods -n crossplane-system -l pkg.crossplane.io/provider=provider-azure-storage -o jsonpath='{.items[0].spec.serviceAccountName}')
+
+echo "Provider Service Account: $PROVIDER_SA"
+
+# Create the federated identity credential
+az identity federated-credential create \
+  --name "crossplane-provider-federation" \
+  --identity-name $CROSSPLANE_IDENTITY_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --issuer $AKS_OIDC_ISSUER \
+  --subject "system:serviceaccount:crossplane-system:$PROVIDER_SA" \
+  --audiences "api://AzureADTokenExchange"
+
+echo "✅ Federated credential created"
+```
+
+#### Step 4B.2: Restart Provider Pod
+
+```bash
+# Restart the provider pod to pick up the token mount
+kubectl delete pods -n crossplane-system -l pkg.crossplane.io/provider=provider-azure-storage
+
+echo "⏳ Waiting for provider pod to restart..."
+kubectl wait --for=condition=ready pod -l pkg.crossplane.io/provider=provider-azure-storage -n crossplane-system --timeout=120s
+
+# Verify the token file is mounted
+kubectl exec -n crossplane-system $(kubectl get pods -n crossplane-system -l pkg.crossplane.io/provider=provider-azure-storage -o jsonpath='{.items[0].metadata.name}') -- ls -la /var/run/secrets/azure/tokens/
+
+echo "✅ Provider pod restarted with Workload Identity token"
 ```
 
 > **Note**: We use `provider.pkg.crossplane.io` to specify the Crossplane provider CRD explicitly, since Gatekeeper also has a `providers` CRD.
