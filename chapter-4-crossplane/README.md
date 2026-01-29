@@ -122,9 +122,20 @@ kubectl get crds | grep crossplane
 kubectl get deployment -n crossplane-system
 ```
 
-## 🔌 Step 3: Create a Service Principal for Crossplane
+## 🔌 Step 3: Configure Azure Authentication
 
-For this lab, we'll use a Service Principal with client secret for simpler authentication:
+Choose **one** of the following authentication methods:
+
+| Option | Method            | Use Case                               |
+| ------ | ----------------- | -------------------------------------- |
+| **A**  | Service Principal | Simpler setup, good for labs           |
+| **B**  | Workload Identity | Production-ready, no secrets to manage |
+
+---
+
+### Option A: Service Principal Authentication
+
+Use this option for simpler setup in lab environments:
 
 ```bash
 # Get tenant and subscription IDs
@@ -148,9 +159,149 @@ echo "Crossplane Service Principal Client ID: $CROSSPLANE_CLIENT_ID"
 echo "✅ Service Principal created"
 ```
 
-> **Note**: In production, you should use Workload Identity instead of client secrets. For this lab, we use a Service Principal for simplicity.
+> **⚠️ Security Note**: Service Principal secrets expire and need rotation. Use Option B (Workload Identity) for production environments.
 
-> **🎯 Optional Exercise**: After completing this chapter, try re-configuring the Azure provider to use Workload Identity (similar to Chapter 3's ASO setup) for architectural consistency across your operators.
+**➡️ After completing Option A, skip to Step 4.**
+
+---
+
+### Option B: Workload Identity Authentication (Production)
+
+Use this option for production-grade, secretless authentication:
+
+#### Step 3B.1: Create a Managed Identity for Crossplane
+
+```bash
+# Get tenant and subscription IDs
+export TENANT_ID=$(az account show --query tenantId -o tsv)
+export SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+# Create a User-Assigned Managed Identity for Crossplane
+export CROSSPLANE_IDENTITY_NAME="id-crossplane-$STUDENT_INITIALS"
+
+az identity create \
+  --name $CROSSPLANE_IDENTITY_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --location $LOCATION
+
+# Get the identity details
+export CROSSPLANE_CLIENT_ID=$(az identity show \
+  --name $CROSSPLANE_IDENTITY_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --query clientId -o tsv)
+
+export CROSSPLANE_PRINCIPAL_ID=$(az identity show \
+  --name $CROSSPLANE_IDENTITY_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --query principalId -o tsv)
+
+echo "Crossplane Managed Identity Client ID: $CROSSPLANE_CLIENT_ID"
+echo "✅ Managed Identity created"
+```
+
+#### Step 3B.2: Assign RBAC Permissions
+
+```bash
+# Assign Contributor role to the managed identity
+az role assignment create \
+  --assignee $CROSSPLANE_PRINCIPAL_ID \
+  --role "Contributor" \
+  --scope "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP"
+
+echo "✅ RBAC role assigned"
+```
+
+#### Step 3B.3: Get AKS OIDC Issuer URL
+
+```bash
+# Get the OIDC issuer URL from your AKS cluster
+export AKS_OIDC_ISSUER=$(az aks show \
+  --name $CLUSTER_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --query "oidcIssuerProfile.issuerUrl" -o tsv)
+
+echo "AKS OIDC Issuer: $AKS_OIDC_ISSUER"
+
+# Verify OIDC is enabled
+if [ -z "$AKS_OIDC_ISSUER" ]; then
+  echo "❌ OIDC not enabled on AKS cluster. Enable it with:"
+  echo "az aks update --name $CLUSTER_NAME --resource-group $RESOURCE_GROUP --enable-oidc-issuer"
+  exit 1
+fi
+```
+
+#### Step 3B.4: Create Federated Identity Credential
+
+The Crossplane Azure provider runs in the `crossplane-system` namespace. We need to create a federated credential for the provider's service account:
+
+```bash
+# Wait for the provider to be installed first (we'll create this after Step 4)
+# The service account name follows the pattern: <provider-name>-<hash>
+# For now, save the identity name for later use
+
+echo "⚠️ Note: Complete Step 4 first, then return here to create the federated credential"
+echo "CROSSPLANE_IDENTITY_NAME=$CROSSPLANE_IDENTITY_NAME" >> crossplane-env.sh
+echo "CROSSPLANE_CLIENT_ID=$CROSSPLANE_CLIENT_ID" >> crossplane-env.sh
+```
+
+#### Step 3B.5: Create Federated Credential (Run after Step 4)
+
+After the Azure provider is installed in Step 4, run:
+
+```bash
+# Source the saved environment if needed
+source crossplane-env.sh 2>/dev/null || true
+
+# Get the provider pod's service account name
+export PROVIDER_SA=$(kubectl get pods -n crossplane-system -l pkg.crossplane.io/provider=provider-azure-storage -o jsonpath='{.items[0].spec.serviceAccountName}')
+
+echo "Provider Service Account: $PROVIDER_SA"
+
+# Create the federated identity credential
+az identity federated-credential create \
+  --name "crossplane-provider-federation" \
+  --identity-name $CROSSPLANE_IDENTITY_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --issuer $AKS_OIDC_ISSUER \
+  --subject "system:serviceaccount:crossplane-system:$PROVIDER_SA" \
+  --audiences "api://AzureADTokenExchange"
+
+echo "✅ Federated credential created"
+```
+
+#### Step 3B.6: Annotate the Provider Service Account
+
+```bash
+# Annotate the service account with the managed identity client ID
+kubectl annotate serviceaccount $PROVIDER_SA \
+  -n crossplane-system \
+  azure.workload.identity/client-id=$CROSSPLANE_CLIENT_ID \
+  --overwrite
+
+# Label the service account for workload identity
+kubectl label serviceaccount $PROVIDER_SA \
+  -n crossplane-system \
+  azure.workload.identity/use=true \
+  --overwrite
+
+echo "✅ Service account annotated for Workload Identity"
+```
+
+#### Step 3B.7: Restart the Provider Pod
+
+```bash
+# Restart the provider pod to pick up the new identity
+kubectl delete pods -n crossplane-system -l pkg.crossplane.io/provider=provider-azure-storage
+
+echo "⏳ Waiting for provider pod to restart..."
+kubectl wait --for=condition=ready pod -l pkg.crossplane.io/provider=provider-azure-storage -n crossplane-system --timeout=120s
+
+echo "✅ Provider pod restarted with Workload Identity"
+```
+
+**➡️ After completing Option B, continue to Step 4 (if not done) or Step 6B for ProviderConfig.**
+
+---
 
 ## 📦 Step 4: Install Azure Provider
 
@@ -193,7 +344,15 @@ NAME                       INSTALLED   HEALTHY   PACKAGE                        
 provider-azure-storage     True        True      xpkg.upbound.io/upbound/provider-azure-storage:v1.1.0   Xm
 ```
 
-## 🔐 Step 6: Create Provider Configuration with Secret
+## 🔐 Step 6: Create Provider Configuration
+
+Choose the option matching your authentication method from Step 3:
+
+---
+
+### Option A: ProviderConfig with Service Principal Secret
+
+If you used **Option A (Service Principal)** in Step 3:
 
 ```bash
 # Create a Kubernetes secret with Azure credentials
@@ -223,8 +382,36 @@ spec:
       key: credentials
 EOF
 
-echo "✅ ProviderConfig created"
+echo "✅ ProviderConfig created (Service Principal)"
 ```
+
+---
+
+### Option B: ProviderConfig with Workload Identity
+
+If you used **Option B (Workload Identity)** in Step 3:
+
+```bash
+# Create the ProviderConfig for Workload Identity
+cat <<EOF | kubectl apply -f -
+apiVersion: azure.upbound.io/v1beta1
+kind: ProviderConfig
+metadata:
+  name: default
+spec:
+  credentials:
+    source: OIDCTokenFile
+  subscriptionID: $SUBSCRIPTION_ID
+  tenantID: $TENANT_ID
+  clientID: $CROSSPLANE_CLIENT_ID
+EOF
+
+echo "✅ ProviderConfig created (Workload Identity)"
+```
+
+> **💡 Note**: With Workload Identity, no secrets are stored in Kubernetes. The provider authenticates using the federated credential configured in Step 3B.
+
+---
 
 ## 📋 Step 7: Create a Namespace for Crossplane Resources
 
