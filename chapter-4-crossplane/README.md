@@ -576,7 +576,82 @@ kubectl describe account $XP_STORAGE_NAME
 kubectl get providers
 ```
 
-## 🚀 Next Steps
+## � Troubleshooting
+
+### Error: "az executable file not found in $PATH"
+
+This error means the Azure provider is trying to use Azure CLI authentication instead of the secret-based credentials:
+
+```
+cannot configure AzureCli Authorizer: exec: "az": executable file not found in $PATH
+```
+
+**Causes and fixes:**
+
+1. **ProviderConfig not created or misconfigured**
+   ```bash
+   # Check if ProviderConfig exists
+   kubectl get providerconfig default -o yaml
+   
+   # Verify it references the secret correctly
+   kubectl get providerconfig default -o jsonpath='{.spec.credentials}'
+   ```
+
+2. **Secret missing or malformed**
+   ```bash
+   # Check if secret exists
+   kubectl get secret azure-creds -n crossplane-system
+   
+   # Verify secret contents (will show base64 encoded)
+   kubectl get secret azure-creds -n crossplane-system -o jsonpath='{.data.credentials}' | base64 -d
+   ```
+
+3. **Recreate the secret and ProviderConfig**
+   ```bash
+   # Delete existing resources
+   kubectl delete providerconfig default
+   kubectl delete secret azure-creds -n crossplane-system
+   
+   # Recreate (run Step 6 again)
+   kubectl create secret generic azure-creds \
+     -n crossplane-system \
+     --from-literal=credentials="{
+     \"clientId\": \"$CROSSPLANE_CLIENT_ID\",
+     \"clientSecret\": \"$CROSSPLANE_CLIENT_SECRET\",
+     \"subscriptionId\": \"$SUBSCRIPTION_ID\",
+     \"tenantId\": \"$TENANT_ID\"
+   }"
+   
+   cat <<EOF | kubectl apply -f -
+   apiVersion: azure.upbound.io/v1beta1
+   kind: ProviderConfig
+   metadata:
+     name: default
+   spec:
+     credentials:
+       source: Secret
+       secretRef:
+         namespace: crossplane-system
+         name: azure-creds
+         key: credentials
+   EOF
+   ```
+
+4. **Restart the provider pod** (after fixing config)
+   ```bash
+   kubectl delete pods -n crossplane-system -l pkg.crossplane.io/provider=provider-azure-storage
+   ```
+
+5. **Verify environment variables are set**
+   ```bash
+   echo "CROSSPLANE_CLIENT_ID: $CROSSPLANE_CLIENT_ID"
+   echo "SUBSCRIPTION_ID: $SUBSCRIPTION_ID"
+   echo "TENANT_ID: $TENANT_ID"
+   # Don't echo the secret, but verify it's not empty
+   [ -n "$CROSSPLANE_CLIENT_SECRET" ] && echo "CROSSPLANE_CLIENT_SECRET: (set)" || echo "CROSSPLANE_CLIENT_SECRET: (EMPTY!)"
+   ```
+
+## �🚀 Next Steps
 
 Continue to **[Chapter 5: Dapr Introduction](../chapter-5-dapr/README.md)** to learn about building distributed applications with Dapr.
 
